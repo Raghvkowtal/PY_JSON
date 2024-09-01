@@ -1,0 +1,84 @@
+{
+    "file": "image.jpg",
+    "annotations": [
+        {
+            "label": "patient_full_name",
+            "coordinates": {"x1": 784, "y1": 423, "x2": 1814, "y2": 507},
+            "true_text": "John Doe"        },
+        {
+            "label": "date_of_birth",
+            "coordinates": {"x1": 2188, "y1": 435, "x2": 2595, "y2": 509},
+            "true_text": "01/01/1990"
+        },
+        {
+            "label": "Gender",
+            "coordinates": {"x1": 1867, "y1": 429, "x2": 1974, "y2": 507},
+            "true_text": "M"
+        },
+        {
+            "label": "email",
+            "coordinates": {"x1": 1672, "y1": 503, "x2": 2967, "y2": 579},
+            "true_text": "johndoe@example.com"
+        },
+        {
+            "label": "home_address",
+            "coordinates": {"x1": 638, "y1": 568, "x2": 2492, "y2": 643},
+            "true_text": "123 Elm Street, Springfield"
+        },
+        {
+            "label": "apt",
+            "coordinates": {"x1": 2597, "y1": 573, "x2": 2972, "y2": 630},
+            "true_text": "Apt 4B"
+        },
+        {
+            "label": "city",
+            "coordinates": {"x1": 463, "y1": 632, "x2": 1578, "y2": 706},
+            "true_text": "Banglore"
+        },
+        {
+            "label": "state",
+            "coordinates": {"x1": 1674, "y1": 636, "x2": 1835, "y2": 704},
+            "true_text": "Karnataka"
+        },
+        {
+            "label": "zipcode",
+            "coordinates": {"x1": 1995, "y1": 640, "x2": 2303, "y2": 706},
+            "true_text": "123567"
+        },
+        {
+            "label": "Phone_1",
+            "coordinates": {"x1": 2420, "y1": 636, "x2": 2976, "y2": 700},
+            "true_text": "(555) 765-4321"
+        },
+        {
+            "label": "Emergency_Contact",
+            "coordinates": {"x1": 911, "y1": 700, "x2": 2295, "y2": 772},
+            "true_text": "Jane Bro"
+        },
+        {
+            "label": "Phone_2",
+            "coordinates": {"x1": 2421, "y1": 700, "x2": 2974, "y2": 766},
+            "true_text": "(555) 765-4321"
+        },
+        {
+            "label": "Policy",
+            "coordinates": {"x1": 669, "y1": 764, "x2": 1154, "y2": 836},
+            "true_text": "Policy #123456"
+        },
+        {
+            "label": "Secondary_Insurance",
+            "coordinates": {"x1": 1300, "y1": 764, "x2": 1627, "y2": 840},
+            "true_text": "Insurance Co B"
+        },
+        {
+            "label": "Policy_Number",
+            "coordinates": {"x1": 1976, "y1": 766, "x2": 2474, "y2": 838},
+           "true_text": "Policy #789012"
+        },
+        {
+            "label": "Secondary_Phone",
+            "coordinates": {"x1": 2608, "y1": 770, "x2": 2976, "y2": 836},
+            "true_text": "(555) 987-6543"
+        }
+    ]
+}

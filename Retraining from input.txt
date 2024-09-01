@@ -1,0 +1,480 @@
+from flask import Flask, request, render_template, redirect, url_for, send_from_directory
+import easyocr
+import pytesseract
+import os
+import tempfile
+import fitz
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+import io
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torchvision import models
+from torch.utils.data import Dataset, DataLoader
+import json
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads/'
+app.config['LABELS_FILE'] = 'labels.json'  # File to store labels
+
+# Check if GPU is available and log the status
+if torch.cuda.is_available():
+    print("CUDA is available. Using GPU.")
+else:
+    print("CUDA is not available. Using CPU.")
+
+# Initialize the OCR reader
+reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+
+# Ensure the upload folder exists
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
+
+# Ensure the labels file exists
+if not os.path.exists(app.config['LABELS_FILE']):
+    with open(app.config['LABELS_FILE'], 'w') as f:
+        json.dump({}, f)
+
+# Path to Tesseract executable (update this path if needed)
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Update to your Tesseract path
+
+# Load pre-trained ResNet model
+model = models.resnet18(pretrained=True)
+model.fc = nn.Linear(model.fc.in_features, 1000)  # Adjust this if you have different classes
+model.eval()
+
+# Image transformation
+preprocess = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files or 'label' not in request.form:
+        return redirect(request.url)
+    
+    file = request.files['file']
+    label = request.form['label']
+
+    if file.filename == '':
+        return redirect(request.url)
+
+    if file:
+        filename = file.filename
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        # Save the label associated with this image
+        save_label(filename, label)
+
+        recognized_text = ocr_scan(file_path)
+        return render_template('result.html', text=recognized_text, file_url=url_for('uploaded_file', filename=filename))
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.route('/classify', methods=['POST'])
+def classify_image():
+    if 'file' not in request.files:
+        return redirect(request.url)
+    file = request.files['file']
+    if file.filename == '':
+        return redirect(request.url)
+    if file:
+        filename = file.filename
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+        classification_result = classify(file_path)
+        return render_template('classification_result.html', result=classification_result, file_url=url_for('uploaded_file', filename=filename))
+
+@app.route('/train', methods=['POST'])
+def train_model():
+    num_epochs = int(request.form.get('epochs', 5))
+    learning_rate = float(request.form.get('learning_rate', 0.001))
+
+    # Initialize dataset and DataLoader
+    train_dataset = CustomDataset(image_folder=app.config['UPLOAD_FOLDER'], transform=preprocess)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+    # Define the optimizer and loss function
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
+
+    # Training loop
+    model.train()
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for inputs, labels in train_loader:
+            if torch.cuda.is_available():
+                inputs, labels = inputs.to('cuda'), labels.to('cuda')
+                model.to('cuda')
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader)}')
+
+    # Save the model
+    torch.save(model.state_dict(), 'trained_model.pth')
+    return "Training complete. Model saved as 'trained_model.pth'."
+
+def classify(image_path):
+    input_image = Image.open(image_path).convert('RGB')
+    input_tensor = preprocess(input_image)
+    input_batch = input_tensor.unsqueeze(0)  # create a mini-batch as expected by the model
+
+    if torch.cuda.is_available():
+        input_batch = input_batch.to('cuda')
+        model.to('cuda')
+
+    with torch.no_grad():
+        output = model(input_batch)
+    # The output has unnormalized scores. To get probabilities, you can run a softmax on it.
+    probabilities = torch.nn.functional.softmax(output[0], dim=0)
+    
+    # Get the top 5 probabilities and class indices
+    top5_prob, top5_catid = torch.topk(probabilities, 5)
+    
+    # Load the class labels
+    with open("imagenet_classes.txt") as f:
+        categories = [s.strip() for s in f.readlines()]
+    
+    results = [(categories[catid], prob.item()) for catid, prob in zip(top5_catid, top5_prob)]
+    return results
+
+def ocr_scan(file_path):
+    if file_path.lower().endswith('.pdf'):
+        # PDF file detected, extract images and perform OCR
+        image_paths = extract_images_from_pdf(file_path)
+        recognized_text = ""
+        for img_path in image_paths:
+            recognized_text += ocr_scan(img_path) + "\n\n"
+        return recognized_text.strip()
+    else:
+        # Image file detected, perform OCR with preprocessing
+        preprocessed_image_path = preprocess_image(file_path)
+        easyocr_text = perform_easyocr(preprocessed_image_path)
+        tesseract_text = perform_tesseract_ocr(preprocessed_image_path)
+        # Combine results from both OCR systems
+        recognized_text = f"EasyOCR: {easyocr_text}\nTesseract: {tesseract_text}"
+        return recognized_text
+
+def preprocess_image(image_path):
+    image = Image.open(image_path)
+    # Convert image to grayscale
+    image = image.convert('L')
+    # Invert image colors for better OCR on dark text
+    image = ImageOps.invert(image)
+    # Enhance contrast
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(2)
+    # Apply a sharpening filter
+    image = image.filter(ImageFilter.SHARPEN)
+    # Denoise image
+    image = image.filter(ImageFilter.MedianFilter(size=3))
+    # Save the preprocessed image
+    preprocessed_image_path = f"{tempfile.mkdtemp()}/{os.path.basename(image_path)}_preprocessed.jpg"
+    image.save(preprocessed_image_path, "JPEG")
+    return preprocessed_image_path
+
+def perform_easyocr(image_path):
+    result = reader.readtext(image_path)
+    recognized_text = " ".join(elem[1] for elem in result)
+    return recognized_text
+
+def perform_tesseract_ocr(image_path):
+    text = pytesseract.image_to_string(image_path)
+    return text
+
+def extract_images_from_pdf(pdf_path):
+    image_paths = []
+    with fitz.open(pdf_path) as doc:
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            image_list = page.get_images(full=True)
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image = Image.open(io.BytesIO(image_bytes))
+                if image.mode == 'RGBA':
+                    image = image.convert('RGB')  # Convert RGBA to RGB
+                image_path = f"{tempfile.mkdtemp()}/{os.path.basename(pdf_path)}_page{page_num}_img{img_index}.jpg"
+                image.save(image_path, "JPEG")
+                image_paths.append(image_path)
+    return image_paths
+
+class CustomDataset(Dataset):
+    def __init__(self, image_folder, transform=None):
+        self.image_folder = image_folder
+        self.transform = transform
+        self.image_files = [f for f in os.listdir(image_folder) if os.path.isfile(os.path.join(image_folder, f))]
+        self.labels = self.load_labels()
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.image_folder, self.image_files[idx])
+        image = Image.open(img_name).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        label = self.labels[self.image_files[idx]]
+        return image, label
+
+    def load_labels(self):
+        with open(app.config['LABELS_FILE'], 'r') as f:
+            labels = json.load(f)
+        return labels
+
+def save_label(filename, label):
+    with open(app.config['LABELS_FILE'], 'r') as f:
+        labels = json.load(f)
+
+    labels[filename] = int(label)  # Assuming labels are integers
+
+    with open(app.config['LABELS_FILE'], 'w') as f:
+        json.dump(labels, f)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+==============================================================================================================================
+<!-- <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload or Capture Image and Extract Text</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <style>
+        .frame {
+            border: 2px solid #ccc;
+            padding: 20px;
+            margin: 20px 0;
+            min-height: 500px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #f0f0f0;
+        }
+        .frame img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        .output {
+            margin-top: 20px;
+            min-height: 200px;
+        }
+        textarea {
+            border: 2px solid #ccc;
+            border-radius: 5px;
+            width: 100%;
+            height: 200px;
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+        #loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+        .lds-ring {
+            display: inline-block;
+            position: relative;
+            width: 64px;
+            height: 64px;
+        }
+        .lds-ring div {
+            box-sizing: border-box;
+            display: block;
+            position: absolute;
+            width: 51px;
+            height: 51px;
+            margin: 6px;
+            border: 16px solid #20e1e5;
+            border-radius: 50%;
+            animation: lds-ring 1.2s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+            border-color: #2a3034 transparent transparent transparent;
+        }
+        @keyframes lds-ring {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@2.1.1/dist/tesseract.min.js"></script>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center">Upload or Capture Image and Extract Text</h1>
+        
+        <div class="text-center mb-4">
+            <div class="mb-3">
+                <form id="uploadForm" class="d-inline-block">
+                    <input type="file" id="fileInput" class="form-control-file" accept=".jpg, .jpeg, .png, .pdf">
+                    <button type="submit" class="btn btn-primary mt-2">Upload</button>
+                </form>
+            </div>
+            <div>
+                <button id="startCamera" class="btn btn-primary">Start Camera</button>
+                <button id="captureImage" class="btn btn-secondary ml-2" disabled>Capture Image</button>
+            </div>
+        </div>
+
+        <div id="loading">
+            <div class="lds-ring"><div></div><div></div><div></div><div></div></div>
+            <p>Loading...</p>
+        </div>
+        
+        <div class="frame mt-4" id="image-frame">
+            <video id="video" width="100%" height="500px" style="display: none;"></video>
+            <canvas id="canvas" width="640" height="480" style="display: none;"></canvas>
+            <img id="uploadedImage" alt="Uploaded Image">
+            <span id="noImage" class="text-muted">No image uploaded or captured yet</span>
+        </div>
+
+        
+        <div class="output mt-4">
+            <h4>Extracted Text:</h4>
+            <textarea id="extractedText" readonly></textarea>
+        </div>
+    </div>
+
+    <script>
+        const startCameraButton = document.getElementById('startCamera');
+        const captureImageButton = document.getElementById('captureImage');
+        const fileInput = document.getElementById('fileInput');
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const uploadedImage = document.getElementById('uploadedImage');
+        const noImageMessage = document.getElementById('noImage');
+        const loadingAnimation = document.getElementById('loading');
+        const extractedText = document.getElementById('extractedText');
+
+        let stream;
+
+        startCameraButton.addEventListener('click', async () => {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            video.style.display = 'block';
+            video.play();
+            captureImageButton.disabled = false;
+        });
+
+        captureImageButton.addEventListener('click', () => {
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageDataURL = canvas.toDataURL('image/png');
+            uploadedImage.src = imageDataURL;
+            uploadedImage.style.display = 'block';
+            video.style.display = 'none';
+            noImageMessage.style.display = 'none';
+            stream.getTracks().forEach(track => track.stop());
+
+            loadingAnimation.style.display = 'block';
+
+            Tesseract.recognize(
+                imageDataURL,
+                'eng',
+                {
+                    logger: function(m) {
+                        console.log(m);
+                    }
+                }
+            ).then(function(result) {
+                extractedText.value = result.data.text;
+                loadingAnimation.style.display = 'none';
+            });
+        });
+
+        document.getElementById('uploadForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            if (fileInput.files.length === 0) {
+                alert('Please select a file to upload');
+                return;
+            }
+
+            loadingAnimation.style.display = 'block';
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                uploadedImage.src = e.target.result;
+
+                uploadedImage.onload = function() {
+                    uploadedImage.style.display = 'block';
+                    noImageMessage.style.display = 'none';
+
+                    Tesseract.recognize(
+                        uploadedImage.src,
+                        'eng',
+                        {
+                            logger: function(m) {
+                                console.log(m);
+                            }
+                        }
+                    ).then(function(result) {
+                        extractedText.value = result.data.text;
+                        loadingAnimation.style.display = 'none';
+                    });
+                };
+            };
+            reader.readAsDataURL(file);
+        });
+    </script>
+</body>
+</html>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Upload Image</title>
+</head>
+<body>
+    <h1>Upload Image</h1>
+    <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+        <label for="file">Select image:</label>
+        <input type="file" name="file" id="file" required><br><br>
+
+        <label for="label">Label:</label>
+        <input type="text" name="label" id="label" required><br><br>
+
+        <label for="x1">ROI X1:</label>
+        <input type="number" name="x1" id="x1" required><br><br>
+
+        <label for="y1">ROI Y1:</label>
+        <input type="number" name="y1" id="y1" required><br><br>
+
+        <label for="x2">ROI X2:</label>
+        <input type="number" name="x2" id="x2" required><br><br>
+
+        <label for="y2">ROI Y2:</label>
+        <input type="number" name="y2" id="y2" required><br><br>
+
+        <input type="submit" value="Upload">
+    </form>
+</body>
+</html> -->
